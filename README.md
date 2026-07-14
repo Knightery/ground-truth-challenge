@@ -37,6 +37,22 @@ fact you need is in the data.
 
 ---
 
+## Your task
+
+You implement **one function**, `ingest`, in `starter/my_solution.py`.
+
+The evaluation feeds your function a stream of results, one at a time, in order. For each result, your function reads the current belief graph and decides what, if anything, should change, then returns that decision as a list of structured *deltas*. The graph updates only through those deltas. Across the whole stream, your function has to produce the right sequence of decisions.
+
+That decision policy is the entire challenge: how you read the strength of a result, how far you move a belief, how you tell a real contradiction apart from something outside your model, and how you refuse to be manipulated by the text.
+
+- **Deliverable:** your filled-in `ingest` function, plus a one-page `DESIGN.md` describing how it weighs evidence and how it enforces the firewall.
+- **How you develop it:** run `python selfcheck.py` against the six-item practice sandbox, which has a public answer key, and iterate until your instincts are right.
+- **How it is judged:** your function is run against a larger, harder stream you do not see until after submissions close, and scored on the four capabilities below.
+
+The rest of this README is the detail behind that: the concepts you need, the exact interface, and precisely what the four capabilities mean.
+
+---
+
 ## Background: the ideas you need
 
 
