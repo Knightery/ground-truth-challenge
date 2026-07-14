@@ -23,8 +23,4 @@ describing your evidence-weighting model and how you enforce the firewall.
 
 **Judging.** Automated, against a hidden evidence stream, on four axes: firewall
 integrity (pass/fail gate), revision correctness (40), robustness to false
-evidence (25), out-of-distribution detection (35). A live leaderboard runs during
-the event against a subset of hidden cases. Final ranking uses the full hidden set
-revealed at close.
-
-**Conduct.** Follow the event code of conduct. Be excellent to each other.
+evidence (25), out-of-distribution detection (35). 
