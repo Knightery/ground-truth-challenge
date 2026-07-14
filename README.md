@@ -39,8 +39,6 @@ fact you need is in the data.
 
 ## Background: the ideas you need
 
-If you have never seen these terms, read this section once and the rest of the
-repo will make sense.
 
 **Belief graph.** A set of *claims*, each with a *confidence* between 0 and 1, plus
 the *entities* the claims are about and the relationships between them. In this
@@ -131,10 +129,8 @@ outside it is rejected by the validator. The full contract, with every field, is
 
 ## What is being tested
 
-Four capabilities. Your score is built directly from them. This is the whole
-rubric; read it carefully.
 
-**1. Calibrated belief revision (40 points).** Move confidence by an amount
+**1. Calibrated belief revision.** Move confidence by an amount
 proportional to the strength of the evidence, read from structured provenance, not
 from the tone of the text. A single weak result barely moves anything; a
 well-replicated one moves a lot; direction must be right. Bonus: scope a belief to
@@ -149,7 +145,7 @@ enforces most of this structurally, but you still fail if your own code chooses 
 emit a bad delta. Do not rely on the safety cap to save you; the correct behavior is
 to not emit the delta at all.
 
-**3. Skepticism without gullibility (25 points).** Hold firm against extraordinary
+**3. Skepticism without gullibility.** Hold firm against extraordinary
 claims backed by thin provenance, and resolve them correctly when the truth arrives.
 Hold a single-source unreplicated result as pending; drop it cleanly when it fails to
 replicate; strengthen a belief slightly when a well-powered study confirms it. One of
@@ -157,7 +153,7 @@ the false alarms in the hidden set is fabricated and has no real-world counterpa
 a system that "recognizes the answer" from training data gets no help. Only genuine
 provenance-based skepticism passes it.
 
-**4. Out-of-distribution detection (35 points).** Separate three cases and act
+**4. Out-of-distribution detection.** Separate three cases and act
 differently on each: an in-model contradiction (revise it), an out-of-model *regime*
 such as a transition the graph cannot express (flag and propose a new category), and
 an out-of-model *axis* such as a property the graph does not track at all (flag and
