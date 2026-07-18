@@ -7,9 +7,63 @@ on anything it cannot judge.
 """
 from __future__ import annotations
 import re
+import sys
+import warnings
 from dataclasses import dataclass
 import json
 import os
+
+
+# ---------------------------------------------------------------------------
+# Eager startup check: tell the user RIGHT AWAY whether the LLM is available.
+# This runs once at import time, before any evidence items are processed.
+# ---------------------------------------------------------------------------
+def _check_llm_ready() -> bool:
+    key = os.getenv("GT_API_KEY")
+    base = os.getenv("GT_BASE_URL")
+    if not key or not base:
+        missing = [v for v, val in [("GT_API_KEY", key), ("GT_BASE_URL", base)] if not val]
+        print(
+            f"\n{'='*60}\n"
+            f"  ⚠  GROUND TRUTH: LLM is NOT configured.\n"
+            f"  Missing env vars: {', '.join(missing)}\n"
+            f"\n"
+            f"  Results will have LOWER ACCURACY without an LLM.\n"
+            f"  The geometric fallback cannot handle all evidence types.\n"
+            f"\n"
+            f"  To enable the LLM, set these before running:\n"
+            f"    GT_API_KEY=<your-api-key>\n"
+            f"    GT_BASE_URL=<endpoint-url>  (e.g. https://api.deepseek.com)\n"
+            f"    GT_MODEL=<model-name>        (optional, default: deepseek-chat)\n"
+            f"{'='*60}\n",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        import openai  # noqa: F401
+    except ImportError:
+        print(
+            f"\n{'='*60}\n"
+            f"  ⚠  GROUND TRUTH: 'openai' package is NOT installed.\n"
+            f"  LLM env vars are set but the client library is missing.\n"
+            f"\n"
+            f"  Results will have LOWER ACCURACY without an LLM.\n"
+            f"\n"
+            f"  Install with:  pip install openai\n"
+            f"{'='*60}\n",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        f"  ✓  GROUND TRUTH: LLM configured "
+        f"(model={os.getenv('GT_MODEL', 'deepseek-chat')}, "
+        f"base={base})",
+        file=sys.stderr,
+    )
+    return True
+
+
+_LLM_AVAILABLE = _check_llm_ready()
 
 
 @dataclass
@@ -142,10 +196,14 @@ def _default_complete():
     key, base = os.getenv("GT_API_KEY"), os.getenv("GT_BASE_URL")
     model = os.getenv("GT_MODEL", "deepseek-chat")
     if not key or not base:
-        return None
+        return None  # startup check already warned the user
+
+    try:
+        from openai import OpenAI  # noqa: F811
+    except ImportError:
+        return None  # startup check already warned the user
 
     def _complete(system: str, user: str) -> str:
-        from openai import OpenAI  # lazy; only imported when an endpoint is configured
         client = OpenAI(api_key=key, base_url=base)
         kwargs = dict(
             model=model, temperature=float(os.getenv("GT_TEMP", "0")),
@@ -166,9 +224,19 @@ def classify(body: str, view, complete=None) -> Verdict:
         return classify_geometric(body, view)
     try:
         v = _parse_verdict(complete(_system_prompt(view), _user_prompt(body)))
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"GROUND TRUTH: LLM call failed ({type(exc).__name__}: {exc}); "
+            f"falling back to geometric classifier for this item.",
+            stacklevel=2,
+        )
         return classify_geometric(body, view)
     if v is None:
+        warnings.warn(
+            "GROUND TRUTH: LLM returned unparseable response; "
+            "falling back to geometric classifier for this item.",
+            stacklevel=2,
+        )
         return classify_geometric(body, view)
     # Robustness: the model sometimes flags a contradiction but omits or misnames the target claim,
     # which would otherwise drop to a no_op. Derive the target from the mentioned cell states -- the
