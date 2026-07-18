@@ -384,24 +384,14 @@ The ONLY module that emits a mutation, and it never reads item.body. Magnitude i
 function of provenance, so no text can size or authorize a change.
 """
 from __future__ import annotations
-import math
 
 from groundtruth.deltas import Delta, no_op
 from groundtruth.ingest import IngestResult
+from groundtruth.model import logit as _logit, sigmoid as _sigmoid
 from classify import Verdict
-from provenance import strength as _strength   # noqa: F401  (re-exported for callers/tests)
 
 HOLD_BAR = 3.0
 CAP_SAFE = 2.5   # < api CAP_LOGODDS (3.0)
-
-
-def _logit(p: float) -> float:
-    p = min(max(p, 1e-6), 1 - 1e-6)
-    return math.log(p / (1 - p))
-
-
-def _sigmoid(x: float) -> float:
-    return 1 / (1 + math.exp(-x))
 
 
 def _revised(old: float, s: float) -> float:
