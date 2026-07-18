@@ -49,14 +49,26 @@ def _pick_target(states: list, view) -> str | None:
 def classify_geometric(body: str, view) -> Verdict:
     v = Verdict()
     states = _mentioned_states(body, view)
-    if len(states) >= 2:
-        origin, dest = states[0], states[-1]
-        if dest.potency_level < origin.potency_level:
-            v.is_contradiction = True
-            v.target = _pick_target(states, view)
-        elif (dest.potency_level == origin.potency_level
-              and dest.lineage_identity != origin.lineage_identity):
-            v.is_regime = True
+    if len(states) < 2:
+        return v
+    levels = [s.potency_level for s in states]
+    # A step to a MORE potent state (lower potency_level number) is a potency INCREASE -- a reversal
+    # that contradicts the "transitions do not increase potency" family. This holds ANYWHERE along a
+    # multi-hop path, so a reversal-then-redifferentiation (terminal -> its progenitor -> a sibling
+    # terminal) is an in-model contradiction, NOT a lateral regime. Judging every hop, not just the
+    # endpoints, is what stops the near-miss precision trap (e.g. NM06).
+    if any(levels[i] < levels[i - 1] for i in range(1, len(levels))):
+        v.is_contradiction = True
+        v.target = _pick_target(states, view)
+        return v
+    # No reversal: a lateral regime is a DIRECT same-potency, cross-lineage jump with NO intermediate
+    # state of a different potency passed through (a visited progenitor makes it an ordinary path).
+    origin, dest = states[0], states[-1]
+    passed_through_intermediate = any(s.potency_level != origin.potency_level for s in states[1:-1])
+    if (origin.potency_level == dest.potency_level
+            and origin.lineage_identity != dest.lineage_identity
+            and not passed_through_intermediate):
+        v.is_regime = True
     return v
 
 
@@ -72,10 +84,13 @@ def _system_prompt(view) -> str:
         "Questions:\n"
         "- is_axis: the evidence is about a property the graph does NOT track (e.g. age, function) "
         "with cell identity unchanged.\n"
-        "- is_regime: a direct conversion between two same-potency endpoint states in DIFFERENT "
-        "lineages (a lateral jump the graph cannot express).\n"
-        "- is_contradiction: it describes a transition that contradicts a claim (e.g. a cell becoming "
-        "MORE potent / less committed).\n"
+        "- is_regime: a DIRECT single-step conversion between two same-potency terminal states in "
+        "DIFFERENT lineages, passing through NO intermediate state. If the cells pass THROUGH a "
+        "progenitor or intermediate state (even briefly, even if they later re-differentiate), it is "
+        "NOT a regime -- it is an ordinary multi-step path; answer via is_contradiction instead.\n"
+        "- is_contradiction: any described step that makes a cell MORE potent / less committed (a "
+        "reversal toward a stem-like or progenitor state), INCLUDING when it then re-differentiates. "
+        "A reversal that passes through an intermediate is in-model, NOT out-of-model.\n"
         'Return ONLY JSON: {"is_axis":bool,"is_regime":bool,"is_contradiction":bool,"target":claim_id_or_null}. '
         "target is the single existing claim id this bears on, or null."
     )

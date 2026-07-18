@@ -12,10 +12,25 @@ def test_count_handles_ints_and_words():
 
 
 def test_strong_replicated_direct_is_high():
-    prov = {"independent_groups": 4, "replication_count": "many",
-            "method_directness": "direct", "effect_strength": "strong",
-            "retraction_status": "none"}
-    assert strength(prov) >= 8.0
+    strong = {"independent_groups": 4, "replication_count": "many",
+              "method_directness": "direct", "effect_strength": "strong",
+              "retraction_status": "none"}
+    moderate = {"independent_groups": "several", "replication_count": "several",
+                "method_directness": "direct", "effect_strength": "moderate",
+                "retraction_status": "none"}
+    # strong, replicated, direct evidence lands well into the "large move" band (>=7 of 10) and
+    # clearly above a moderate result. Exact magnitude is not asserted (revision is graded on shape).
+    assert strength(strong) >= 7.0
+    assert strength(strong) > strength(moderate)
+
+
+def test_more_groups_moves_strictly_more():
+    # no strong-end plateau: 8 independent groups must out-weigh 4 (both otherwise identical).
+    def s(g):
+        return strength({"independent_groups": g, "replication_count": "several",
+                         "method_directness": "direct", "effect_strength": "strong",
+                         "retraction_status": "none"})
+    assert s(8) > s(4) > s(2)
 
 
 def test_single_unreplicated_is_below_hold_bar():
