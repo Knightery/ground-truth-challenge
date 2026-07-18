@@ -40,6 +40,15 @@ def _revised(old: float, s: float) -> float:
     return round(min(max(_sigmoid(_logit(old) - CAP_SAFE * frac), 0.01), 0.99), 3)
 
 
+SUPPORT_CAP = 1.0        # a confirmation NUDGES up -- gentler than a contradiction's CAP_SAFE
+SUPPORT_CEILING = 0.9    # a claim already >= this has no room worth moving on a confirmation
+
+
+def _strengthened(old: float, s: float) -> float:
+    frac = max(0.0, min(1.0, (s - HOLD_BAR) / (10.0 - HOLD_BAR)))
+    return round(min(max(_sigmoid(_logit(old) + SUPPORT_CAP * frac), 0.01), 0.99), 3)
+
+
 def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestResult:
     if v.is_axis:
         return IngestResult([Delta("propose_axis", evidence_id, {"axis": "identity_preserving_property"})],
@@ -61,4 +70,19 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
             deltas.append(Delta("set_scope", evidence_id, {"claim_id": target,
                                                            "scope": {"refuted_under": method}}))
         return IngestResult(deltas, f"in-model contradiction; {target} {old}->{new}", 0.85, False)
+    if v.is_support and v.target and view.get_claim(v.target) is not None:
+        claim = view.get_claim(v.target)
+        # Strengthen ONLY a claim that has room to move, on real (non-thin) provenance, and never an
+        # umbrella claim (min-propagation would clobber a direct up-move). A confirmation of an
+        # already-near-certain, umbrella, or thinly-supported claim is a no-op. Magnitude is still a
+        # pure function of structured provenance, so the firewall is unaffected.
+        if s >= HOLD_BAR and claim.confidence < SUPPORT_CEILING and not claim.derived_from:
+            old = claim.confidence
+            new = _strengthened(old, s)
+            return IngestResult([Delta("revise_confidence", evidence_id,
+                                       {"claim_id": v.target, "new_confidence": new})],
+                                f"in-model confirmation; {v.target} {old}->{new}", 0.75, False)
+        return IngestResult([no_op(evidence_id)],
+                            "confirmation of a near-certain/umbrella/thin claim; no material change",
+                            0.6, False)
     return IngestResult([no_op(evidence_id)], "no grounded change", 0.6, False)

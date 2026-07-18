@@ -1,11 +1,15 @@
 from classify import Verdict
 from decide import dispose
-from groundtruth.loader import load_practice_seed
+from groundtruth.loader import load_practice_seed, load_seed
 from groundtruth.model import GraphView
 
 
 def _view():
     return GraphView(load_practice_seed())
+
+
+def _seed_view():
+    return GraphView(load_seed())
 
 
 def _ops(res):
@@ -50,3 +54,28 @@ def test_contradiction_with_missing_target_is_no_op():
 def test_strong_contradiction_without_method_class_has_no_scope():
     res = dispose(Verdict(is_contradiction=True, target="Q1"), 10.0, {}, _view(), "EV1")
     assert _ops(res) == ["revise_confidence"]
+
+
+def test_support_strengthens_contested_claim():
+    # C4 (contested, 0.45) has room to move; strong confirmation nudges it UP.
+    res = dispose(Verdict(is_support=True, target="C4"), 9.0, {}, _seed_view(), "EV1")
+    assert _ops(res) == ["revise_confidence"]
+    assert res.deltas[0].payload["new_confidence"] > 0.45
+    assert res.ood_flag is False
+
+
+def test_support_of_near_certain_claim_is_no_op():
+    # C5 (0.99) is already near-certain -> no material change on a confirmation.
+    res = dispose(Verdict(is_support=True, target="C5"), 9.0, {}, _seed_view(), "EV1")
+    assert _ops(res) == ["no_op"]
+
+
+def test_thin_support_is_no_op():
+    res = dispose(Verdict(is_support=True, target="C4"), 2.0, {}, _seed_view(), "EV1")
+    assert _ops(res) == ["no_op"]
+
+
+def test_support_of_umbrella_claim_is_no_op():
+    # C3g is an umbrella (derived_from) -> min-propagation would clobber a direct up-move -> no_op.
+    res = dispose(Verdict(is_support=True, target="C3g"), 9.0, {}, _seed_view(), "EV1")
+    assert _ops(res) == ["no_op"]
