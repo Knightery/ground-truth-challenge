@@ -23,4 +23,4 @@ no tag-stripping (which would mangle benign text like "CD4<CD8 ratio>0.5"), no r
 the classifier restates the untrusted text in another language before answering, destroying the lexical
 machinery an attack relies on while preserving benign meaning. Determinism: temperature 0 + pure
 strength/dispose; any parse error, timeout, or missing endpoint falls back to the geometric classifier,
-and any unexpected exception returns a safe no_op — an item is never crashed into a mutation.
+and any unexpected exception returns a safe no_op — an item is never crashed into a mutation. The structural guarantee is exact for magnitude (provenance-only) and op vocabulary (closed set); on the LLM path the target/type are body-derived, so the language-restatement is mitigation for target selection, not a structural guarantee. Determinism is hard-guaranteed on the geometric fallback; the LLM path runs at temperature 0 (stable, not bit-exact).

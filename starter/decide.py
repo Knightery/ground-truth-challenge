@@ -13,6 +13,27 @@ from classify import Verdict
 HOLD_BAR = 3.0
 CAP_SAFE = 2.5   # < api CAP_LOGODDS (3.0)
 
+MECHANISM_CHILD = {
+    "defined_factor": "C3c",
+    "environmental_stress": "C3d",
+    "env_stress": "C3d",
+    "oocyte": "C3b",
+    "spontaneous": "C3a",
+}
+
+
+def _resolve_target(target, prov, view):
+    """Prefer the mechanism-specific child of an umbrella claim, so the revision is not erased by
+    the framework's min-propagation from unchanged children."""
+    claim = view.get_claim(target)
+    if claim is None or not claim.derived_from:
+        return target
+    method = str(prov.get("method_class", "")).lower()
+    for key, child in MECHANISM_CHILD.items():
+        if key in method and child in claim.derived_from and view.get_claim(child) is not None:
+            return child
+    return target
+
 
 def _revised(old: float, s: float) -> float:
     frac = max(0.0, min(1.0, (s - HOLD_BAR) / (10.0 - HOLD_BAR)))
@@ -31,12 +52,13 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
             return IngestResult([Delta("hold_pending", evidence_id,
                                        {"claim_id": evidence_id, "note": f"unreplicated contradiction of {v.target}"})],
                                 "thin/extraordinary; held pending", 0.6, False)
-        old = view.get_claim(v.target).confidence
+        target = _resolve_target(v.target, prov, view)
+        old = view.get_claim(target).confidence
         new = _revised(old, s)
-        deltas = [Delta("revise_confidence", evidence_id, {"claim_id": v.target, "new_confidence": new})]
+        deltas = [Delta("revise_confidence", evidence_id, {"claim_id": target, "new_confidence": new})]
         method = str(prov.get("method_class", "")).strip()
         if method:
-            deltas.append(Delta("set_scope", evidence_id, {"claim_id": v.target,
+            deltas.append(Delta("set_scope", evidence_id, {"claim_id": target,
                                                            "scope": {"refuted_under": method}}))
-        return IngestResult(deltas, f"in-model contradiction; {v.target} {old}->{new}", 0.85, False)
+        return IngestResult(deltas, f"in-model contradiction; {target} {old}->{new}", 0.85, False)
     return IngestResult([no_op(evidence_id)], "no grounded change", 0.6, False)

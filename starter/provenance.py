@@ -25,7 +25,7 @@ def strength(prov: dict) -> float:
         return 0.0
     groups = _count(prov.get("independent_groups", 0))
     reps = _count(prov.get("replication_count", 0))
-    directness = DIRECTNESS.get(str(prov.get("method_directness", "")).strip().lower(), 0.6)
-    effect = EFFECT.get(str(prov.get("effect_strength", "")).strip().lower(), 0.7)
+    directness = DIRECTNESS.get(str(prov.get("method_directness", "")).strip().lower(), 0.4)
+    effect = EFFECT.get(str(prov.get("effect_strength", "")).strip().lower(), 0.4)
     base = min(10.0, 2.0 * groups + 0.5 * reps)   # independent groups dominate
     return max(0.0, min(10.0, base * directness * effect))

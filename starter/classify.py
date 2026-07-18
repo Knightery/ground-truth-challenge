@@ -38,13 +38,8 @@ def _find_claim(view, *needles) -> str | None:
     return None
 
 
-def _pick_target(states: list, prov: dict, view) -> str | None:
-    if any(s.potency_level <= 1 for s in states):          # a return toward the most-potent state
-        method = str(prov.get("method_class", "")).lower()
-        for key, child in (("defined_factor", "C3c"), ("environmental_stress", "C3d"),
-                           ("env_stress", "C3d"), ("oocyte", "C3b"), ("spontaneous", "C3a")):
-            if key in method and view.get_claim(child) is not None:
-                return child
+def _pick_target(states: list, view) -> str | None:
+    if any(s.potency_level <= 1 for s in states):
         t = _find_claim(view, "return") or _find_claim(view, "cannot", "source")
         if t:
             return t
@@ -58,7 +53,7 @@ def classify_geometric(body: str, view) -> Verdict:
         origin, dest = states[0], states[-1]
         if dest.potency_level < origin.potency_level:
             v.is_contradiction = True
-            v.target = _pick_target(states, {}, view)
+            v.target = _pick_target(states, view)
         elif (dest.potency_level == origin.potency_level
               and dest.lineage_identity != origin.lineage_identity):
             v.is_regime = True

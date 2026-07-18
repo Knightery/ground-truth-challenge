@@ -34,6 +34,7 @@ def test_strong_contradiction_revises_and_scopes():
 def test_thin_contradiction_holds_pending_no_mutation():
     res = dispose(Verdict(is_contradiction=True, target="Q1"), 2.0, {}, _view(), "EV1")
     assert _ops(res) == ["hold_pending"]
+    assert res.deltas[0].payload["claim_id"] == "EV1"
 
 
 def test_all_false_is_no_op():
@@ -44,3 +45,8 @@ def test_all_false_is_no_op():
 def test_contradiction_with_missing_target_is_no_op():
     res = dispose(Verdict(is_contradiction=True, target="NOPE"), 9.0, {}, _view(), "EV1")
     assert _ops(res) == ["no_op"]
+
+
+def test_strong_contradiction_without_method_class_has_no_scope():
+    res = dispose(Verdict(is_contradiction=True, target="Q1"), 10.0, {}, _view(), "EV1")
+    assert _ops(res) == ["revise_confidence"]
