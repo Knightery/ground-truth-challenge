@@ -127,11 +127,14 @@ def _default_complete():
     def _complete(system: str, user: str) -> str:
         from openai import OpenAI  # lazy; only imported when an endpoint is configured
         client = OpenAI(api_key=key, base_url=base)
-        resp = client.chat.completions.create(
+        kwargs = dict(
             model=model, temperature=float(os.getenv("GT_TEMP", "0")),
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format={"type": "json_object"},
         )
+        try:  # some deployments (e.g. DeepSeek V4 on Azure) reject response_format; retry without it
+            resp = client.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
+        except Exception:
+            resp = client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
 
     return _complete
