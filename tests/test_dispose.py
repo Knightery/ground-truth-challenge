@@ -1,0 +1,46 @@
+from classify import Verdict
+from decide import dispose
+from groundtruth.loader import load_practice_seed
+from groundtruth.model import GraphView
+
+
+def _view():
+    return GraphView(load_practice_seed())
+
+
+def _ops(res):
+    return [d.op for d in res.deltas]
+
+
+def test_axis_proposes_axis_and_flags():
+    res = dispose(Verdict(is_axis=True), 0.0, {}, _view(), "EV1")
+    assert _ops(res) == ["propose_axis"] and res.ood_flag is True
+
+
+def test_regime_proposes_regime_and_flags():
+    res = dispose(Verdict(is_regime=True), 0.0, {}, _view(), "EV1")
+    assert _ops(res) == ["propose_regime"] and res.ood_flag is True
+
+
+def test_strong_contradiction_revises_and_scopes():
+    prov = {"method_class": "defined_factor_perturbation"}
+    res = dispose(Verdict(is_contradiction=True, target="Q1"), 10.0, prov, _view(), "EV1")
+    assert "revise_confidence" in _ops(res) and "set_scope" in _ops(res)
+    assert res.ood_flag is False
+    new = next(d.payload["new_confidence"] for d in res.deltas if d.op == "revise_confidence")
+    assert new < 0.93
+
+
+def test_thin_contradiction_holds_pending_no_mutation():
+    res = dispose(Verdict(is_contradiction=True, target="Q1"), 2.0, {}, _view(), "EV1")
+    assert _ops(res) == ["hold_pending"]
+
+
+def test_all_false_is_no_op():
+    res = dispose(Verdict(), 9.0, {}, _view(), "EV1")
+    assert _ops(res) == ["no_op"]
+
+
+def test_contradiction_with_missing_target_is_no_op():
+    res = dispose(Verdict(is_contradiction=True, target="NOPE"), 9.0, {}, _view(), "EV1")
+    assert _ops(res) == ["no_op"]
