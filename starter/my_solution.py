@@ -1,38 +1,28 @@
-"""YOUR SOLUTION GOES HERE.
+"""GROUND TRUTH solution: strength -> classify -> dispose.
 
-Implement ingest(item, view). It is called once per evidence item, in order.
-You get:
-  - item : the new evidence.  item.body (text), item.provenance (STRUCTURED,
-           trustworthy channel), item.era.  NOTE: item.tag is empty at runtime.
-  - view : a READ-ONLY snapshot of the current belief state. You can read claims,
-           cell states, the domain of competence, and declared absences. You
-           CANNOT write to it. The only way to change the belief state is to
-           return Deltas.
-
-You return an IngestResult:
-  - deltas    : a list of Delta objects (your proposed changes). See the vocabulary
-                in groundtruth/deltas.py. Anything not in that vocabulary is rejected.
-  - rationale : a short string explaining your decision (logged, good for debugging)
-  - confidence: your confidence in this decision, 0..1
-  - ood_flag  : True if this evidence falls OUTSIDE what the model represents
-
-Run  `python selfcheck.py`  to test against the practice sandbox.
+strength() sizes any change from the STRUCTURED provenance; classify() (one LLM call, or a
+geometric fallback) says what the evidence is; dispose() maps that to legal Deltas and never
+reads the body. Injections are inert by construction: we only act on a described transition.
 """
-from groundtruth.deltas import Delta, no_op
-from groundtruth.ingest import EvidenceItem, IngestResult
-from groundtruth.model import GraphView
+from __future__ import annotations
+import os
+import sys
+
+# Make helper modules importable under every loader the framework uses.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from groundtruth.ingest import EvidenceItem, IngestResult   # noqa: E402
+from groundtruth.model import GraphView                     # noqa: E402
+from provenance import strength                             # noqa: E402
+from classify import classify                               # noqa: E402
+from decide import dispose                                  # noqa: E402
 
 
 def ingest(item: EvidenceItem, view: GraphView) -> IngestResult:
-    # ---- starter: does nothing. Replace with your reasoning. ----
-    #
-    # Example of proposing a change (only through a Delta, never by writing to view):
-    #   claim = view.get_claim("C3c")
-    #   if claim is not None:
-    #       return IngestResult(
-    #           deltas=[Delta("revise_confidence", item.id,
-    #                         {"claim_id": "C3c", "new_confidence": 0.4})],
-    #           rationale="strong, replicated contradiction",
-    #           confidence=0.8, ood_flag=False)
-    #
-    return IngestResult(deltas=[no_op(item.id)], rationale="starter no-op", confidence=0.5, ood_flag=False)
+    try:
+        v = classify(item.body, view)
+        s = strength(item.provenance)
+        return dispose(v, s, item.provenance, view, item.id)
+    except Exception:
+        from groundtruth.deltas import no_op
+        return IngestResult([no_op(item.id)], "error; safe no-op", 0.0, False)
