@@ -38,7 +38,26 @@ def test_strong_contradiction_revises_and_scopes():
 def test_thin_contradiction_holds_pending_no_mutation():
     res = dispose(Verdict(is_contradiction=True, target="Q1"), 2.0, {}, _view(), "EV1")
     assert _ops(res) == ["hold_pending"]
-    assert res.deltas[0].payload["claim_id"] == "EV1"
+    # pending is keyed by the doubted claim so a later result can resolve it
+    assert res.deltas[0].payload["claim_id"] == "Q1"
+
+
+def test_resolved_pending_is_dropped_on_strong_result():
+    # a prior tentative doubt about C4 is held pending; a later strong contradiction of C4 both
+    # revises the claim AND drops the now-resolved pending cleanly.
+    graph = load_seed()
+    graph.pending["C4"] = {"note": "earlier unreplicated doubt", "evidence_id": "OLD"}
+    view = GraphView(graph)
+    res = dispose(Verdict(is_contradiction=True, target="C4"), 9.0,
+                  {"method_class": "defined_factor_perturbation"}, view, "EV2")
+    ops = _ops(res)
+    assert "revise_confidence" in ops and "drop_claim" in ops
+    assert any(d.op == "drop_claim" and d.payload["claim_id"] == "C4" for d in res.deltas)
+
+
+def test_no_drop_when_target_not_pending():
+    res = dispose(Verdict(is_contradiction=True, target="Q1"), 10.0, {}, _view(), "EV1")
+    assert "drop_claim" not in _ops(res)
 
 
 def test_all_false_is_no_op():

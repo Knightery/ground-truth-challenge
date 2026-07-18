@@ -58,8 +58,10 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
                             "out-of-model regime (lateral)", 0.7, True)
     if v.is_contradiction and v.target and view.get_claim(v.target) is not None:
         if s < HOLD_BAR:
+            # Key the pending note by the CLAIM it doubts (not the evidence id) so a later, stronger
+            # result about that same claim can resolve and drop it cleanly (see the drop below).
             return IngestResult([Delta("hold_pending", evidence_id,
-                                       {"claim_id": evidence_id, "note": f"unreplicated contradiction of {v.target}"})],
+                                       {"claim_id": v.target, "note": f"unreplicated contradiction of {v.target}"})],
                                 "thin/extraordinary; held pending", 0.6, False)
         target = _resolve_target(v.target, prov, view)
         old = view.get_claim(target).confidence
@@ -69,6 +71,8 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
         if method:
             deltas.append(Delta("set_scope", evidence_id, {"claim_id": target,
                                                            "scope": {"refuted_under": method}}))
+        if v.target in view.pending_ids():   # a real, well-powered result resolves a prior tentative
+            deltas.append(Delta("drop_claim", evidence_id, {"claim_id": v.target}))   # doubt -> drop it
         return IngestResult(deltas, f"in-model contradiction; {target} {old}->{new}", 0.85, False)
     if v.is_support and v.target and view.get_claim(v.target) is not None:
         claim = view.get_claim(v.target)
