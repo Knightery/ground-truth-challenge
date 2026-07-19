@@ -3,6 +3,8 @@ name-anchored, sentence-scoped guarantees that keep it injection-proof. No netwo
 """
 import my_solution
 from classify import classify_offline, classify_prose, _mentioned_states
+from decide import dispose
+from provenance import strength
 from groundtruth.ingest import EvidenceItem
 from groundtruth.loader import load_practice_seed, load_practice_stream, load_seed
 from groundtruth.model import GraphView
@@ -89,6 +91,90 @@ def test_appended_injection_does_not_change_pr06_deltas():
 
 
 def test_prose_layer_needs_a_canonical_name_in_the_sentence():
-    # A reversal cue with NO canonical cell-state name in the sentence is ignored.
-    v = classify_prose("The terminal cells reverted to a less-committed stem-like state.", _real_view())
+    # A reversal cue with NO canonical cell-state name/alias in the sentence is ignored.
+    v = classify_prose("The terminal cells reverted to a much less-committed condition.", _real_view())
     assert v.is_contradiction is False
+
+
+# --- Alias extraction: ordinary-language names resolve to canonical states ------------------------
+
+def test_alias_extraction_resolves_informal_names():
+    names = {s.name for s in _mentioned_states(
+        "Fibroblasts adopted neuronal morphology; some became myotubes.", _real_view())}
+    assert {"Fibroblast", "Neuron", "SkeletalMuscleCell"} <= names
+
+
+# --- Phenotype-marker recall: a lateral conversion named only by markers is still a regime ---------
+
+def test_marker_named_lateral_conversion_is_regime():
+    # Endpoints named by tissue-of-origin / protein markers, not canonical names (OOD-REGIME-09 shape).
+    body = ("Intestinal organoid cultures transduced with MyoD and Pax7 generated contractile, "
+            "multinucleated cells expressing myosin heavy chain within four weeks, with no "
+            "intervening progenitor stage reported.")
+    v = classify_offline(body, _real_view())
+    assert v.is_regime is True and v.is_contradiction is False
+
+
+# --- A hyphenated 'factor-free' descriptor must NOT be read as a negation of the reversal ----------
+
+def test_factor_free_is_not_read_as_negation():
+    body = ("Committed Fibroblast cells underwent a spontaneous, factor-free reversion to the "
+            "PluripotentStemCell state.")
+    v = classify_offline(body, _real_view())
+    assert v.is_contradiction is True and v.mechanism == "spontaneous"
+
+
+# --- Cross-sentence lateral regime is still detected ---------------------------------------------
+
+def test_cross_sentence_lateral_is_regime():
+    body = ("Intestinal epithelial organoids were cultured with two neural factors. Within days a "
+            "subpopulation became mature neurons, with no intervening progenitor stage.")
+    v = classify_offline(body, _real_view())
+    assert v.is_regime is True and v.is_contradiction is False
+
+
+# --- Near-miss precision trap: a cross-sentence reversal path stays IN-MODEL (not a regime) -------
+
+def test_cross_sentence_reversal_path_is_not_regime():
+    body = ("Contractile SkeletalMuscleCell fibers appeared in gut-derived IntestinalEpithelialCell "
+            "cultures. Tracing showed the epithelial nuclei had first been reset to the "
+            "PluripotentStemCell state before being pushed toward a myogenic fate.")
+    v = classify_offline(body, _real_view())
+    assert v.is_regime is False              # visiting pluripotency makes it an in-model contradiction
+    assert v.is_contradiction is True
+
+
+# --- Mechanism-correct targeting: a spontaneous reversal routes to the C3a child ------------------
+
+def test_spontaneous_reversal_targets_c3a_child():
+    body = ("Across many replicate long-term cultures, committed Fibroblast cells underwent a "
+            "spontaneous, factor-free reversion to the PluripotentStemCell state.")
+    view = _real_view()
+    v = classify_offline(body, view)
+    assert v.is_contradiction is True and v.mechanism == "spontaneous"
+    prov = {"independent_groups": "many", "replication_count": "many",
+            "method_class": "observational", "method_directness": "direct",
+            "effect_strength": "strong", "retraction_status": "none"}
+    res = dispose(v, strength(prov), prov, view, "EV")
+    revised = [d for d in res.deltas if d.op == "revise_confidence"]
+    assert revised and revised[0].payload["claim_id"] == "C3a"
+
+
+# --- Confirmation of a dented child strengthens it (bounded), not a no-op -------------------------
+
+def test_confirmation_restrengthens_a_dented_child():
+    graph = load_seed()
+    graph.claims["C3d"].confidence = 0.6        # pretend a prior item dented C3d
+    view = GraphView(graph)
+    body = ("A blinded multi-center consortium applied the identical hypoxic-stress protocol and found "
+            "zero instances of pluripotency reversion in IntestinalEpithelialCell cultures; cells "
+            "remained terminally differentiated by every marker.")
+    v = classify_offline(body, view)
+    assert v.is_support is True and v.mechanism == "env_stress"
+    prov = {"independent_groups": "many", "replication_count": "many",
+            "method_class": "environmental_stress", "method_directness": "direct",
+            "effect_strength": "strong", "retraction_status": "none"}
+    res = dispose(v, strength(prov), prov, view, "EV")
+    revised = [d for d in res.deltas if d.op == "revise_confidence"]
+    assert revised and revised[0].payload["claim_id"] == "C3d"
+    assert revised[0].payload["new_confidence"] > 0.6

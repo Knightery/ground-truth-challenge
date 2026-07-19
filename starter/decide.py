@@ -22,12 +22,18 @@ MECHANISM_CHILD = {
 }
 
 
-def _resolve_target(target, prov, view):
+def _resolve_target(target, prov, view, mechanism=None):
     """Prefer the mechanism-specific child of an umbrella claim, so the revision is not erased by
-    the framework's min-propagation from unchanged children."""
+    the framework's min-propagation from unchanged children. The mechanism is taken first from the
+    classifier (which reads it, sentence-scoped, from the transition prose -- method_class is often a
+    generic label like 'observational'), then from the structured method_class as a fallback."""
     claim = view.get_claim(target)
     if claim is None or not claim.derived_from:
         return target
+    if mechanism:
+        child = MECHANISM_CHILD.get(mechanism)
+        if child and child in claim.derived_from and view.get_claim(child) is not None:
+            return child
     method = str(prov.get("method_class", "")).lower()
     for key, child in MECHANISM_CHILD.items():
         if key in method and child in claim.derived_from and view.get_claim(child) is not None:
@@ -71,7 +77,7 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
             return IngestResult([Delta("hold_pending", evidence_id,
                                        {"claim_id": v.target, "note": f"unreplicated contradiction of {v.target}"})],
                                 "thin/extraordinary; held pending", 0.6, False)
-        target = _resolve_target(v.target, prov, view)
+        target = _resolve_target(v.target, prov, view, v.mechanism)
         old = view.get_claim(target).confidence
         new = _revised(old, s)
         deltas = [Delta("revise_confidence", evidence_id, {"claim_id": target, "new_confidence": new})]
@@ -83,17 +89,24 @@ def dispose(v: Verdict, s: float, prov: dict, view, evidence_id: str) -> IngestR
             deltas.append(Delta("drop_claim", evidence_id, {"claim_id": v.target}))   # doubt -> drop it
         return IngestResult(deltas, f"in-model contradiction; {target} {old}->{new}", 0.85, False)
     if v.is_support and v.target and view.get_claim(v.target) is not None:
-        claim = view.get_claim(v.target)
-        # Strengthen ONLY a claim that has room to move, on real (non-thin) provenance, and never an
-        # umbrella claim (min-propagation would clobber a direct up-move). A confirmation of an
-        # already-near-certain, umbrella, or thinly-supported claim is a no-op. Magnitude is still a
-        # pure function of structured provenance, so the firewall is unaffected.
+        # An umbrella confirmation only strengthens a SPECIFIC, dented mechanism child. Without a
+        # single named mechanism it stays umbrella-level -> no_op (never push the min-derived parent
+        # up directly). Strengthen only a non-umbrella claim with room, on real provenance.
+        target = v.target
+        claim = view.get_claim(target)
+        if claim.derived_from:
+            child = _resolve_target(target, prov, view, v.mechanism) if v.mechanism else target
+            if child == target:
+                return IngestResult([no_op(evidence_id)],
+                                    "umbrella-level confirmation; min-derived, no direct strengthen",
+                                    0.6, False)
+            target, claim = child, view.get_claim(child)
         if s >= HOLD_BAR and claim.confidence < SUPPORT_CEILING and not claim.derived_from:
             old = claim.confidence
             new = _strengthened(old, s)
             return IngestResult([Delta("revise_confidence", evidence_id,
-                                       {"claim_id": v.target, "new_confidence": new})],
-                                f"in-model confirmation; {v.target} {old}->{new}", 0.75, False)
+                                       {"claim_id": target, "new_confidence": new})],
+                                f"in-model confirmation; {target} {old}->{new}", 0.75, False)
         return IngestResult([no_op(evidence_id)],
                             "confirmation of a near-certain/umbrella/thin claim; no material change",
                             0.6, False)

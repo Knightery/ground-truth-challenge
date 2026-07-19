@@ -25,15 +25,41 @@ class Verdict:
     is_contradiction: bool = False  # a transition contradicting an existing claim (reversal)
     is_support: bool = False        # a confirming/replicating result that strengthens a claim
     target: str | None = None       # the existing claim id it bears on
+    mechanism: str | None = None    # reversal mechanism named in the transition sentence (routes to child)
+
+
+# ---------------------------------------------------------------------------------------------
+# Entity extraction. The production system uses an LLM for this step; offline we approximate it
+# with a domain-grounded lexicon: each canonical cell state maps to the ordinary-language names and
+# adjective/marker forms a biologist would use for it (e.g. "neuronal" -> Neuron, "myotube" ->
+# SkeletalMuscleCell, "pluripotent" -> PluripotentStemCell). This is generic domain modelling, not
+# item-specific matching: it is keyed only to the six seed states' own identities, so it generalises
+# to unseen prose. Aliases are deliberately SPECIFIC (e.g. "mesodermal progenitor", never a bare
+# "progenitor") to protect OOD precision -- inventing a progenitor intermediate that was not there
+# would turn a real lateral regime into a false in-model contradiction.
+# ---------------------------------------------------------------------------------------------
+_ALIAS_PATTERNS = {
+    "PluripotentStemCell": (r"pluripotent\s+stem\s+cell", r"pluripotent(?:\s+cell)?", r"pluripotency",
+                            r"induced\s+pluripotent", r"\bi?psc\b", r"\bes\s+cells?\b",
+                            r"embryonic\s+stem\s+cell", r"stem[-\s]?like\s+(?:state|cell)",
+                            r"stem\s+cell", r"naive\s+ground\s+state"),
+    "MesodermalProgenitor": (r"mesodermal\s+progenitor", r"mesoderm\s+progenitor"),
+    "Fibroblast": (r"fibroblast", r"fibroblastic"),
+    "SkeletalMuscleCell": (r"skeletal\s+muscle\s+cell", r"skeletal\s+muscle", r"skeletal\s+myocyte",
+                           r"myocyte", r"myotube", r"myofib(?:er|re)", r"muscle\s+cell",
+                           r"myosin\s+heavy\s+chain", r"multinucleated\s+(?:contractile\s+)?"
+                           r"(?:cell|fib(?:er|re)|myotube)"),
+    "Neuron": (r"neuron", r"neuronal", r"neural\s+cell"),
+    "IntestinalEpithelialCell": (r"intestinal\s+epithelial\s+cell", r"intestinal\s+epithelial",
+                                 r"intestinal\s+epithelium", r"gut\s+epithelium", r"gut\s+epithelial",
+                                 r"intestinal\s+organoid", r"gut\s+organoid", r"enterocyte"),
+}
+_ALIAS_RE = {name: re.compile("|".join(f"(?:{p})" for p in pats), re.I)
+             for name, pats in _ALIAS_PATTERNS.items()}
 
 
 def _match_state(token: str, view):
-    """Resolve one word token to a canonical cell state, tolerating simple morphology.
-
-    The matcher is still NAME-anchored (no fuzzy/marker matching): it only strips regular English
-    plurals so "Fibroblasts"/"Neurons"/"IntestinalEpithelialCells" resolve to their canonical state.
-    Hyphenated forms (e.g. "MesodermalProgenitor-like") already split on the hyphen at tokenization,
-    so the leading canonical token is matched directly."""
+    """Resolve one word token to a canonical cell state, tolerating simple plural morphology."""
     cs = view.cell_state(token)
     if cs is not None:
         return cs
@@ -49,14 +75,53 @@ def _match_state(token: str, view):
     return None
 
 
-def _mentioned_states(body: str, view) -> list:
-    out, seen = [], set()
+_MENTION_NEG = re.compile(r"\b(?:no|not|never|without|neither|nor|absence|lack|zero|free\s+of)\b", re.I)
+# Movement/transition verbs. If one sits between a negation and a named state, the negation governs
+# the verb's OTHER argument, not the state ("no genetic manipulation DROVE X back" -> X is real),
+# whereas a bare "no ... pluripotent markers" (no movement verb) genuinely denies the state.
+_MOVEMENT_VERB = re.compile(
+    r"\b(?:return\w*|reset\w*|driv\w*|drove|push\w*|convert\w*|reprogram\w*|brought|took|taken|sent|"
+    r"restored|revert\w*|dedifferentiat\w*|de-?differentiat\w*|differentiat\w*|transdifferentiat\w*|"
+    r"gave\s+rise|turned?\s+into|became|becom\w*|adopt\w*|generat\w*|produc\w*|yield\w*|regress\w*|"
+    r"stabiliz\w*|resolv\w*|acquir\w*)\b", re.I)
+
+
+def _mention_negated(body: str, pos: int) -> bool:
+    """True if the named state at `pos` is asserted ABSENT: a negation earlier in its clause with no
+    movement verb between the negation and the state ('no stage expressed pluripotency' -> PSC not
+    visited; but 'no genetic manipulation drove X to PSC' keeps both X and PSC)."""
+    start = max((body.rfind(ch, 0, pos) for ch in ".;:,!?\n"), default=-1)
+    clause = body[start + 1:pos]
+    m = _MENTION_NEG.search(clause)
+    return bool(m) and not _MOVEMENT_VERB.search(clause, m.end())
+
+
+def _mentioned_states(body: str, view, drop_negated: bool = False) -> list:
+    """Canonical states named in the body, in order of first appearance (path order matters for the
+    multi-hop reversal check). Combines exact/plural token matching with the domain alias lexicon.
+
+    When `drop_negated` is set, a state whose every mention sits in a negated/absence clause ("no
+    stage expressed pluripotency") is dropped -- it was asserted to be NOT visited, so counting it
+    would fabricate a phantom hop. This filter is applied only when the body does not assert a
+    reversal, so a real reversal's participants (e.g. "...drove X back to PluripotentStemCell", which
+    also contains an unrelated 'no genetic manipulation') are never discarded."""
+    positions: dict[str, list[int]] = {}
     for m in re.finditer(r"[A-Za-z][A-Za-z0-9]+", body):
         cs = _match_state(m.group(0), view)
-        if cs is not None and cs.name not in seen:
-            seen.add(cs.name)
-            out.append(cs)
-    return out
+        if cs is not None:
+            positions.setdefault(cs.name, []).append(m.start())
+    for name, rx in _ALIAS_RE.items():
+        if name in positions or view.cell_state(name) is None:
+            continue
+        for m in rx.finditer(body):
+            positions.setdefault(name, []).append(m.start())
+    first: dict[str, int] = {}
+    for name, ps in positions.items():
+        keep = [p for p in ps if not (drop_negated and _mention_negated(body, p))]
+        if keep:
+            first[name] = min(keep)
+    order = sorted(first, key=lambda n: first[n])
+    return [view.cell_state(n) for n in order]
 
 
 def _find_claim(view, *needles) -> str | None:
@@ -67,8 +132,18 @@ def _find_claim(view, *needles) -> str | None:
     return None
 
 
-def _pick_target(states: list, view) -> str | None:
-    if any(s.potency_level <= 1 for s in states):
+def _pick_target(states: list, view, pluripotent_dest: bool = False) -> str | None:
+    """Route a reversal to the claim it actually bears on.
+
+    A TERMINAL (most-committed) cell reaching PLURIPOTENCY contradicts the "terminal cell cannot
+    return to pluripotency" umbrella (C3g family). Any other potency increase -- a progenitor
+    reverting, or a terminal only partly de-committing toward an intermediate -- contradicts the
+    general potency-monotonicity claim (C1). Getting this split right is what puts the revision on
+    the correct trajectory instead of always hammering C1."""
+    potencies = [s.potency_level for s in states] or [0]
+    has_terminal = any(p >= 3 for p in potencies)
+    reaches_pluripotent = pluripotent_dest or any(p <= 1 for p in potencies)
+    if has_terminal and reaches_pluripotent:
         t = _find_claim(view, "return") or _find_claim(view, "cannot", "source")
         if t:
             return t
@@ -77,28 +152,92 @@ def _pick_target(states: list, view) -> str | None:
 
 def classify_geometric(body: str, view) -> Verdict:
     v = Verdict()
-    states = _mentioned_states(body, view)
+    # Whole-body extraction (drop_negated: a state named only in an absence clause was NOT visited).
+    # Whole-body is needed because both the near-miss reversal path and true lateral regimes routinely
+    # span two sentences ("...Neurons appeared... tracing showed nuclei had been reset to PSC earlier").
+    states = _mentioned_states(body, view, drop_negated=True)
     if len(states) < 2:
         return v
     levels = [s.potency_level for s in states]
-    # A step to a MORE potent state (lower potency_level number) is a potency INCREASE -- a reversal
-    # that contradicts the "transitions do not increase potency" family. This holds ANYWHERE along a
-    # multi-hop path, so a reversal-then-redifferentiation (terminal -> its progenitor -> a sibling
-    # terminal) is an in-model contradiction, NOT a lateral regime. Judging every hop, not just the
-    # endpoints, is what stops the near-miss precision trap (e.g. NM06).
-    if any(levels[i] < levels[i - 1] for i in range(1, len(levels))):
-        v.is_contradiction = True
-        v.target = _pick_target(states, view)
+    # A step to a MORE potent state (lower potency number) is a potency INCREASE -- a reversal that
+    # contradicts the "transitions do not increase potency" family. Judging every hop (not just the
+    # endpoints) is what stops the near-miss precision trap: a terminal that first went back to a
+    # pluripotent/progenitor state and then re-specialised names a lower-potency state, so the path
+    # shows a drop and is an in-model CONTRADICTION, never a lateral regime.
+    drop = next((i for i in range(1, len(levels)) if levels[i] < levels[i - 1]), None)
+    if drop is not None:
+        origin, dest = states[drop - 1], states[drop]
+        # Denial is judged ONLY on the self-contained sentence that names BOTH endpoints of the drop.
+        # This is the firewall hinge: an appended payload lives in its own sentence, so its negations
+        # ("...never returns...") can never reach in to suppress the real evidence sentence's reversal.
+        if not _transition_denied(body, view, origin, dest):
+            v.is_contradiction = True
+            v.target = _pick_target(states, view)
+            v.mechanism = _mechanism_near(body, view, dest)
         return v
-    # No reversal: a lateral regime is a DIRECT same-potency, cross-lineage jump with NO intermediate
-    # state of a different potency passed through (a visited progenitor makes it an ordinary path).
-    origin, dest = states[0], states[-1]
-    passed_through_intermediate = any(s.potency_level != origin.potency_level for s in states[1:-1])
-    if (origin.potency_level == dest.potency_level
-            and origin.lineage_identity != dest.lineage_identity
-            and not passed_through_intermediate):
-        v.is_regime = True
+    # No potency drop anywhere. A lateral REGIME is a same-potency, cross-lineage move with NO
+    # different-potency state between the endpoints (a visited progenitor/pluripotent stage would have
+    # produced a drop above and made it in-model).
+    if _has_lateral_pair(states):
+        # An asserted "through an intermediate / progenitor stage" => an ordinary in-model path.
+        if _clause_asserted(body, _ADJACENT_HINT):
+            return v
+        # Require the conversion to be ASSERTED (or the states named with no conversion verb at all). A
+        # DENIED conversion ("no protocol converted X into Y") confirms C2 -> no_op.
+        if _cue_asserted(body, _CONVERSION_CUE) or not _CONVERSION_CUE.search(body):
+            v.is_regime = True
     return v
+
+
+def _transition_denied(body: str, view, origin, dest) -> bool:
+    """A drop is denied only if the sentence naming BOTH endpoints reports the reversal did not happen
+    (a confirmation). A cross-sentence drop (near-miss reversal path) is a real reversal -> not denied."""
+    for sent in _sentences(body):
+        names = {s.name for s in _mentioned_states(sent, view, drop_negated=True)}
+        if origin.name in names and dest.name in names:
+            return _reversal_denied(sent)
+    return False
+
+
+# The reversal MECHANISM, read (sentence-scoped) from the transition sentence. This chooses WHICH
+# umbrella child the reversal bears on (C3a spontaneous / C3b oocyte-NT / C3c defined-factor / C3d
+# env-stress). It is a classification choice, not a magnitude, so reading it from prose is firewall-
+# safe -- an appended payload lives in its own sentence and cannot reach the transition sentence, and
+# it can only re-point the write among already-legitimate children, never enlarge or authorise it.
+_MECHANISM_PATTERNS = (
+    ("oocyte", r"oocyte|nuclear\s+transfer|\bscnt\b|enucleat\w*|somatic\s+cell\s+nuclear"),
+    ("defined_factor", r"defined[-\s]?factor|four[-\s]?factor|multi[-\s]?factor|transcription[-\s]?factor"
+                       r"|reprogramming\s+factor|yamanaka|\boskm\b|oct[-\s]?4|sox2|klf4|nanog|"
+                       r"transduc\w+|overexpress\w+|forced\s+expression|ectopic\s+expression"),
+    ("env_stress", r"environmental\s+stress|\bstress(?:ed|ors?|ing)?\b|hypoxi\w*|acid\w*|low[-\s]?ph|"
+                   r"mechanical|heat[-\s]?shock|starvation|injury|ischemi\w*"),
+    ("spontaneous", r"spontaneous\w*|unprompted|factor[-\s]?free|stochastic|without\s+(?:any\s+)?"
+                    r"(?:added\s+)?(?:factor|manipulation)|no\s+(?:added\s+)?factors"),
+)
+_MECHANISM_RE = [(k, re.compile(p, re.I)) for k, p in _MECHANISM_PATTERNS]
+
+
+def _mechanism_near(body: str, view, dest) -> str | None:
+    """Mechanism keyword found in a sentence that names the reversal destination `dest` (scoped there
+    to stay injection-safe). Returns one of spontaneous/oocyte/defined_factor/env_stress, or None."""
+    for sent in _sentences(body):
+        if any(s.name == dest.name for s in _mentioned_states(sent, view, drop_negated=True)):
+            for key, rx in _MECHANISM_RE:
+                if rx.search(sent):
+                    return key
+    return None
+
+
+def _has_lateral_pair(states: list) -> bool:
+    """True if two states share a potency level but differ in lineage, with no different-potency state
+    listed between them (a visited progenitor/pluripotent stage would make it an ordinary path)."""
+    for i in range(len(states)):
+        for j in range(i + 1, len(states)):
+            a, b = states[i], states[j]
+            if (a.potency_level == b.potency_level and a.lineage_identity != b.lineage_identity
+                    and not any(s.potency_level != a.potency_level for s in states[i + 1:j])):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------------------------
@@ -128,34 +267,131 @@ _LOW_POTENCY_NOUN = (r"(?:pluripoten\w*|stem[-\s]?like|stem\s+cell\w*|progenitor
                      r"differentiated|primitive|embryonic|blastocyst\w*)")
 _REVERSAL_VERB = re.compile(
     r"\b(?:reverted|reverting|reverts|revert|reversion|de-?differentiat\w*|regress\w*|"
-    r"back-?slid\w*|de-?committ\w*)\b", re.I)
+    r"back-?slid\w*|de-?committ\w*|dedifferentiat\w*)\b", re.I)
 _MOVE_TO_LOW = re.compile(
-    r"\b(?:return\w*|reset\w*|driven|drove|push\w*|convert\w*|reprogram\w*|brought|taken|sent|"
-    r"restored)\b[\w\s,'-]{0,45}?\b" + _LOW_POTENCY_NOUN + r"\b", re.I)
+    r"\b(?:return\w*|reset\w*|driven|drove|drive|push\w*|convert\w*|reprogram\w*|brought|taken|"
+    r"sent|restored|regressed|back\s+(?:to|toward|towards|into))\b[\w\s,'\"-]{0,60}?\b"
+    + _LOW_POTENCY_NOUN + r"\b", re.I)
 _LESS_COMMITTED = re.compile(r"\bless[-\s]?(?:committed|differentiated|mature|specialized)\b", re.I)
 
-# Negation before a reversal cue means the transition did NOT happen (a confirmation, not a
-# contradiction): "never reverted", "no dedifferentiation", "failed to revert".
-_NEGATION = re.compile(
-    r"\b(?:no|not|never|without|neither|nor|cannot|can't|couldn't|didn't|doesn't|failed|fails|"
-    r"fail)\b", re.I)
+# A lateral CONVERSION cue (for the regime branch): a direct switch of terminal identity.
+_CONVERSION_CUE = re.compile(
+    r"\b(?:convert\w*|conversion|transdifferentiat\w*|trans-?differentiat\w*|interconvert\w*|"
+    r"lineage\s+switch\w*|fate\s+switch\w*|fate\s+conversion|direct\s+conversion|"
+    r"adopt\w*|turned?\s+into|gave\s+rise\s+to|switch\w*\s+(?:to|into)|"
+    r"contribut\w*\s+(?:directly\s+)?to|gener\w*\s+\w*\s*(?:identity|fate))\b", re.I)
+
+# An asserted "passed THROUGH an intermediate / progenitor stage" hint marks an ORDINARY multi-step
+# path (in-model), not a direct lateral regime -- even when the intermediate is unnamed. It must name
+# a LOWER-potency stage (intermediate/progenitor/multipotent), NOT just "through a marker window"
+# (which can be another same-potency terminal phenotype, still a regime). Regime items say the
+# opposite ("no intermediate"), which is negated and so never asserts here.
+_ADJACENT_HINT = re.compile(
+    r"\bthrough\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}?(?:intermediate|progenitor|multipotent)\b"
+    r"|\bvia\s+(?:an?\s+)?(?:\w+\s+){0,2}?(?:intermediate|progenitor|multipotent)\b"
+    r"|\b(?:strictly\s+)?adjacent\s+(?:step|developmental|transition)\b"
+    r"|\bprogressive\s+(?:lineage\s+)?restriction\b", re.I)
+
+# Negation/exclusion that DENIES a following cue. To avoid over-reach ("with NO genetic manipulation
+# DROVE ... back", where the negation attaches to a different noun), the negation must sit within a
+# couple of function-words of the cue -- no content noun may intervene.
+_NEG_WORD = (r"(?:no|not|never|without|neither|nor|cannot|can'?t|could\s?n'?t|did\s?n'?t|does\s?n'?t|"
+             r"do\s?n'?t|failed|fails|fail|zero|rather|instead|absence|lack|ruled|free)")
+_NEG_FILLER = r"(?:\s+(?:to|than|of|any|ever|out|been|be|yet|a|an|the|so|far|thus|single|one|it|that))*"
+# (?<!-) so a hyphenated compound is NOT read as negation: "factor-free"/"stress-free" describe a
+# spontaneous mechanism, they do not deny the reversal the way a standalone "free of ..." would.
+_NEG_PREFIX = re.compile(r"(?<!-)\b" + _NEG_WORD + r"\b" + _NEG_FILLER + r"\s*$", re.I)
+
+# Sentence-level CONFIRMATION of irreversibility: a study that REPORTS the reversal did not / cannot
+# happen. This is support for the claim, never a contradiction, even if a reversal noun appears in a
+# method list (e.g. "...spontaneous-reversion protocols ... found no case ... irreversible").
+_IRREVERSIBLE = re.compile(
+    r"\b(?:no|zero)\s+(?:case|instance|evidence|example|protocol|cell|sign)\w*"
+    r"|\birreversib\w+|\bnever\s+(?:revert|return|dedifferentiat|regress|observed)\w*"
+    r"|\bremain\w*\s+(?:\w+\s+){0,2}?(?:stable|terminal\w*|differentiated|committed|fixed)\b"
+    r"|\b(?:no|zero)\s+(?:[\w-]+\s+){0,4}?(?:reversion|dedifferentiation|potency\s+gain|re-?entry)\b"
+    r"|\bfailed?\s+to\s+(?:revert|return|dedifferentiat|reprogram|reverse)\w*"
+    r"|\bcannot\s+(?:be\s+)?(?:revert\w*|return\w*|dedifferentiat\w*)\b", re.I)
+
+
+def _confirms_irreversibility(text: str) -> bool:
+    return bool(_IRREVERSIBLE.search(text or ""))
+
+
+def _cue_asserted(text: str, cue) -> bool:
+    """True if at least one occurrence of `cue` is NOT immediately preceded by a negation/exclusion."""
+    for m in cue.finditer(text):
+        if not _NEG_PREFIX.search(text[max(0, m.start() - 40):m.start()]):
+            return True
+    return False
+
+
+def _clause_asserted(text: str, cue) -> bool:
+    """Like _cue_asserted but negation is judged at CLAUSE scope (used for the 'through an
+    intermediate' hint, a noun-phrase cue: 'no ... passage through an intermediate' negates it)."""
+    for m in cue.finditer(text):
+        start = max((text.rfind(ch, 0, m.start()) for ch in ".;:,!?\n"), default=-1)
+        if not _MENTION_NEG.search(text[start + 1:m.start()]):
+            return True
+    return False
+
+
+def _asserted_reversal(body: str) -> bool:
+    if _confirms_irreversibility(body):
+        return False
+    return (_cue_asserted(body, _REVERSAL_VERB) or _cue_asserted(body, _MOVE_TO_LOW)
+            or _cue_asserted(body, _LESS_COMMITTED))
+
+
+def _present_reversal(body: str) -> bool:
+    return bool(_REVERSAL_VERB.search(body) or _MOVE_TO_LOW.search(body) or _LESS_COMMITTED.search(body))
+
+
+def _reversal_denied(body: str) -> bool:
+    """True if the text explicitly DENIES the reversal (a confirmation of irreversibility, or a
+    reversal cue that appears only under negation). Two named states with a genuine potency drop are
+    otherwise strong geometric evidence of a reversal even when no cue verb is in the lexicon (e.g.
+    the practice item 'returned LeafA to the SourceState'), so absence of a cue does NOT deny it."""
+    if _confirms_irreversibility(body):
+        return True
+    return _present_reversal(body) and not _asserted_reversal(body)
+
+# A pluripotent/stem-like destination (as opposed to a mere progenitor / less-committed state) means
+# the reversal bears on the "cannot return to pluripotency" umbrella (C3g), not the general C1 rule.
+_PLURIPOTENT_DEST = re.compile(
+    r"\b(?:pluripoten\w*|stem[-\s]?like|stem\s+cell\w*|naive|ground\s+state|embryonic\s+stem|"
+    r"blastocyst\w*|source\s+state|totipoten\w*)\b", re.I)
 
 # Identity-preserving markers: the cell stayed the same state; only an off-axis property changed.
 _IDENTITY_KEPT = re.compile(
-    r"\b(?:remain\w*|stay\w*|retain\w*|kept|unchanged|preserv\w*|identical|stable)\b", re.I)
+    r"\b(?:remain\w*|stay\w*|retain\w*|kept|unchanged|preserv\w*|identical|stable|"
+    r"continu\w*|still)\b", re.I)
 _IDENTITY_KEPT_EXPLICIT = re.compile(
-    r"\bno\s+(?:shift|change)\s+in\s+(?:potency|lineage|identity)\b"
-    r"|\bno\s+(?:lineage|potency|identity)\s+(?:reassignment|change|shift)\b"
+    r"\bno\s+(?:shift|change|alteration)\s+in\s+(?:\w+\s+){0,2}?(?:potency|lineage|identity|fate)\b"
+    r"|\bno\s+(?:\w+\s+){0,2}?(?:lineage|potency|identity)\s+(?:reassignment|change|shift|revision)\b"
+    r"|\bwithout\s+(?:any\s+)?(?:change|shift|alteration)\s+(?:to|in)\s+(?:\w+\s+){0,3}?"
+    r"(?:identity|potency|lineage|fate)\b"
     r"|\b(?:potency|lineage|identity)\b[\w\s,'-]{0,25}\bunchanged\b"
+    r"|\b(?:lineage|potency|identity|assignment)\w*[\w\s,'-]{0,28}?\b"
+    r"(?:never|not|no)\s+(?:revised|changed|reassigned|shifted|altered|updated|reassign\w*)\b"
+    r"|\bidentity\s+did\s+not\s+(?:change|shift|differ)\b"
+    r"|\bnever\s+(?:advanc\w*|progress\w*|revert\w*|differentiat\w*|matur\w*|"
+    r"transition\w*)\s+(?:toward|towards|to|into|back)\b"
+    r"|\bno\s+(?:lineage|potency|identity)\s+reassignment\b"
+    r"|\b(?:express\w*|expressing)\s+all\s+canonical\b"
     r"|\bno\s+dedifferentiation\b|\bidentity\s+(?:was\s+)?retained\b", re.I)
 
 # Properties on the graph's EXCLUDED axes (biological_age, cell_function_independent_of_identity).
 _EXCLUDED_AXIS_PROP = re.compile(
     r"\b(?:age|aged|aging|ageing|senescen\w*|senolytic\w*|telomere\w*|circadian|karyotyp\w*|"
     r"proliferat\w*|migrat\w*|firing\s+rate\w*|action\s+potential\w*|mitochondri\w*|metaboli\w*|"
-    r"ATP|secretion\w*|enzyme\w*|barrier|contractile\s+(?:output|function|marker)|fatigue|"
-    r"synaptic|electrophysiolog\w*|functional\s+(?:decline|readout|recovery)|doubling\s+time|"
-    r"passage\s+\d|culture[-\s]aging|donor\s+age|regenerative)\b", re.I)
+    r"ATP|secretion\w*|enzyme\w*|barrier|contractile\s+(?:force|output|function|strength|marker)|"
+    r"fatigue|synaptic|electrophysiolog\w*|functional\s+(?:decline|readout|recovery)|"
+    r"nutrient[-\s]?absorption|absorpt\w*|uptake|doubling\s+time|passage\s+\d|culture[-\s]aging|"
+    r"donor\s+age|regenerative)\b"
+    r"|\b(?:improved|enhanced|increased|reduced|decreased|elevated|diminished|markedly|greater|"
+    r"declining|declined)\s+(?:\w+[-\s]){0,2}?(?:force|activity|function\w*|performance|capacity|"
+    r"output|efficiency|resistance|density)\b", re.I)
 
 
 def _sentences(body: str) -> list[str]:
@@ -163,19 +399,21 @@ def _sentences(body: str) -> list[str]:
 
 
 def _reversal_in(sentence: str) -> bool:
-    """True if the sentence asserts a (non-negated) move toward a less-committed / more-potent state."""
-    m = _REVERSAL_VERB.search(sentence) or _MOVE_TO_LOW.search(sentence) or _LESS_COMMITTED.search(sentence)
-    if m is None:
+    """True if the sentence ASSERTS a move toward a less-committed / more-potent state -- and does not
+    simultaneously report that the reversal did not happen (a confirmation of irreversibility)."""
+    if _confirms_irreversibility(sentence):
         return False
-    neg = _NEGATION.search(sentence, 0, m.start())     # negation appearing before the cue
-    return neg is None
+    return (_cue_asserted(sentence, _REVERSAL_VERB) or _cue_asserted(sentence, _MOVE_TO_LOW)
+            or _cue_asserted(sentence, _LESS_COMMITTED))
 
 
 def classify_prose(body: str, view) -> Verdict:
     """Sentence-scoped, name-anchored reading of potency direction. Used only when geometry abstains."""
     v = Verdict()
     for sent in _sentences(body):
-        states = _mentioned_states(sent, view)
+        # A state named only in an absence clause ("nor reverting toward pluripotency") is not a
+        # visited state, so drop it -- this keeps identity-preserving axis sentences single-state.
+        states = _mentioned_states(sent, view, drop_negated=True)
         if not states:
             continue                                   # no canonical name in this sentence -> ignore
         identity_kept = bool(_IDENTITY_KEPT_EXPLICIT.search(sent)
@@ -185,17 +423,49 @@ def classify_prose(body: str, view) -> Verdict:
             return v
         if not identity_kept and _reversal_in(sent):
             v.is_contradiction = True                  # a described reversal is an in-model contradiction
-            v.target = _pick_target(states, view)
+            v.target = _pick_target(states, view, pluripotent_dest=bool(_PLURIPOTENT_DEST.search(sent)))
+            for key, rx in _MECHANISM_RE:
+                if rx.search(sent):
+                    v.mechanism = key
+                    break
             return v
     return v
 
 
+def classify_support(body: str, view) -> Verdict:
+    """A CONFIRMATION that a reversal does NOT occur ("found zero reversion ... cells remained
+    terminally differentiated") reaffirms the 'cannot return' family. To keep it firewall-safe and
+    precise it must: (a) confirm irreversibility in a sentence that also names a TERMINAL state, and
+    (b) name EXACTLY ONE reversal mechanism -- a mechanism-specific reaffirmation routes to that child
+    (and only strengthens it if it has been dented); a diffuse, all-mechanisms meta-confirmation names
+    none/many and stays umbrella-level (a no_op, so it can never push the min-derived umbrella up)."""
+    v = Verdict()
+    for sent in _sentences(body):
+        if not _confirms_irreversibility(sent):
+            continue
+        # The terminal cell is the SUBJECT of the confirmation ("...in Fibroblast cultures"), not the
+        # negated object, so keep negated mentions here when checking that a terminal is named.
+        states = _mentioned_states(sent, view, drop_negated=False)
+        if not any(s.potency_level >= 3 for s in states):
+            continue                                   # must be about a terminal cell staying terminal
+        mechs = {k for k, rx in _MECHANISM_RE if rx.search(sent)}
+        v.is_support = True
+        v.target = (_find_claim(view, "return") or _find_claim(view, "cannot", "source")
+                    or _find_claim(view, "potency"))
+        v.mechanism = next(iter(mechs)) if len(mechs) == 1 else None
+        return v
+    return v
+
+
 def classify_offline(body: str, view) -> Verdict:
-    """The full deterministic offline classifier: canonical-name geometry first, prose fallback."""
+    """The full deterministic offline classifier: canonical-name geometry, then prose, then support."""
     v = classify_geometric(body, view)
     if v.is_axis or v.is_regime or v.is_contradiction or v.is_support:
         return v
-    return classify_prose(body, view)
+    v = classify_prose(body, view)
+    if v.is_axis or v.is_regime or v.is_contradiction or v.is_support:
+        return v
+    return classify_support(body, view)
 
 
 def _system_prompt(view) -> str:

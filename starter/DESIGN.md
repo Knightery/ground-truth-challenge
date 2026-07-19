@@ -20,32 +20,51 @@ active `retraction_status` hard-clamps $S = 0$.
 ## 2. Classification (`classify`) — offline, name-anchored
 
 Four mutually exclusive predicates (`is_axis`, `is_regime`, `is_contradiction`, `is_support`) plus a
-target claim, decided in two layers, both anchored on **canonical cell-state names** drawn from the
-graph (matched with light plural/suffix lemmatization so `Fibroblasts`, `Neurons`,
-`MesodermalProgenitor-like` resolve to their state):
+target claim and (for reversals) a mechanism, decided in three layers, all anchored on **canonical
+cell-state names**.
 
-* **Geometry (≥2 named states).** Reason from potency levels and lineage identity along the *whole*
-  path. Any hop to a lower potency number is a potency **increase** → in-model `is_contradiction`,
-  even when the cells later re-differentiate (this defeats the near-miss precision trap: a reversal
-  that visits a real intermediate is in-model, not a lateral regime). A **direct** same-potency,
-  cross-lineage jump with no differing-potency intermediate is an out-of-model `is_regime`.
-* **Prose fallback (1 named state), sentence-scoped.** Geometry needs two names, but some real items
-  name one state and paraphrase the destination (e.g. PR06: *“MidState … reverted to a
-  less-committed state … then re-specialized”*). For each sentence containing a canonical name we
-  read potency **direction** from a small, domain-grounded lexicon: a non-negated reversal /
-  dedifferentiation cue → `is_contradiction`; an explicit *identity-preserving* statement plus an
-  **excluded-axis** property (age / senescence / firing rate / metabolism, per `axes_excluded`) →
-  `is_axis`. Negation (`never reverted`, `no dedifferentiation`) suppresses a false contradiction.
+* **Entity extraction.** The production system uses an LLM for this step; offline we approximate it
+  with a **domain-grounded lexicon** keyed only to the six seed states' own identities: exact/plural
+  token matching (`Fibroblasts`, `IntestinalEpithelialCells`) plus ordinary-language aliases a
+  biologist uses (`neuronal`→Neuron, `myotube`/`myocyte`→SkeletalMuscleCell, `pluripotent`/`iPSC`→
+  PluripotentStemCell). Aliases are deliberately *specific* (`mesodermal progenitor`, never a bare
+  `progenitor`) to protect OOD precision. A state named only inside an **absence clause** (“no stage
+  expressed pluripotency”) is dropped — negation is judged movement-verb-aware so a real subject in a
+  clause like “no genetic manipulation *drove* X back to PSC” is kept.
+* **Geometry (≥2 named states, whole body).** Reason from potency levels and lineage identity along
+  the *whole* path (near-miss reversals and true regimes both routinely span two sentences). Any hop
+  to a lower potency number is a potency **increase** → in-model `is_contradiction`, even when the
+  cells later re-differentiate (this defeats the near-miss precision trap: a reversal that visits a
+  real intermediate is in-model, not a lateral regime). A same-potency, cross-lineage pair with no
+  differing-potency state between them, an asserted conversion, and no “through an intermediate /
+  progenitor” hint, is an out-of-model `is_regime`.
+* **Prose fallback (1 named state), sentence-scoped.** Some items name one state and paraphrase the
+  destination (PR06: *“MidState … reverted to a less-committed state … then re-specialized”*). Per
+  sentence: a non-negated reversal cue → `is_contradiction`; an explicit *identity-preserving*
+  statement plus an **excluded-axis** property (age / senescence / firing rate / metabolism /
+  function, per `axes_excluded`) → `is_axis`.
+* **Support.** A confirmation that a reversal did **not** occur (“found zero pluripotency reversion …
+  cells remained terminally differentiated”), naming a terminal state and exactly one mechanism, is
+  `is_support` on that mechanism child.
+
+Negation is handled at two scopes: cue-negation is token-tight (so `rather than reprogramming`,
+`never reverted` deny, but a distant `no …` does not misfire), while denial that *suppresses a
+detected drop* is judged only on the **self-contained sentence naming both endpoints** — an appended
+payload lives in its own sentence and can never reach in to flip or redirect the real verdict.
 
 ## 3. State Resolution & Mutations (`dispose`)
 
 * **Skepticism gate.** A contradiction with $S <$ `HOLD_BAR` (3.0) emits `hold_pending`, not a write;
-  a later strong result on the same claim resolves and drops it.
+  a later strong result on the same claim resolves and drops the stale pending note.
 * **Calibrated moves.** Confirmed contradictions update in bounded log-odds capped below the API
-  ceiling ($\text{Cap}=2.5$). Confirmations of a claim with room nudge gently ($\text{Cap}=1.0$);
-  confirmations of near-certain or umbrella claims are `no_op`.
-* **Umbrella protection.** Revisions target the mechanism-specific child (or the current MIN child)
-  so the parent settles via the framework’s min-over-children propagation instead of being clobbered.
+  ceiling ($\text{Cap}=2.5$). Confirmations of a dented child nudge gently ($\text{Cap}=1.0$);
+  confirmations of near-certain, umbrella, or thin claims are `no_op`.
+* **Mechanism-correct targeting.** A terminal→pluripotent reversal bears on the “cannot return to
+  pluripotency” umbrella (C3g); a lesser potency increase bears on the general monotonicity claim
+  (C1). Which C3 child (spontaneous/oocyte/defined-factor/env-stress) is chosen from the mechanism the
+  classifier read (sentence-scoped) from the prose — `method_class` is often a generic label — falling
+  back to structured `method_class`, then the current MIN child. Umbrella-level (multi-mechanism)
+  confirmations never push the min-derived parent up directly.
 
 ---
 
@@ -66,7 +85,14 @@ The firewall is enforced by **construction**, not by regex denylists or a magnit
 4. **Fail-safe.** Any exception falls back to a safe `no_op`; the solution is deterministic and
    standard-library only.
 
-Verified offline against the practice sandbox (6/6, PR06 resolved as an in-model revision) and an
-84-item adversarial red-team corpus: **firewall 0/15 breaks** (standalone + byte-exact invariance
-across benign bodies × provenance tiers), **0 logic-defect breaks** across OOD, calibration, and
-stream scenarios.
+Verified offline against the practice sandbox (6/6, PR06 resolved as an in-model revision), the
+public gradient scorecard (**100/100**, firewall PASS, Revision 40, Skepticism 25, OOD F1 = 1.0), and
+the adversarial red-team corpus: **firewall 0/15 breaks** (standalone + byte-exact invariance across
+benign bodies × provenance tiers), **0 logic-defect breaks** across OOD (0/40), calibration (0/21),
+and the 8 stream scenarios. The OOD battery scores tp=10/fp=0/fn=0 (near-miss precision trap held);
+a marker-only lateral conversion (endpoints named by `myosin heavy chain` / `intestinal organoid`
+rather than canonical names) is now recognised as a regime. The only remaining offline no_op misses
+are three confirmations of the contested nuclear-potential claim C4 — deliberately left uncaught:
+the sole textual cue ("differentiated cells retain developmental potential") is a phrase an injection
+can and does contain (see FW-SEMANTIC-03), so any detector for it is spoofable. Per the challenge's
+firewall gate, a safe no_op is strictly preferable to a mutation an attacker could trigger.
