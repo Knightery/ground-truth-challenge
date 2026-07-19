@@ -1,69 +1,21 @@
 """Classify one evidence item into a Verdict.
 
-classify() uses an LLM when an endpoint is configured (Task 5) and otherwise a deterministic,
-keyword-free GEOMETRIC fallback: it reads the cell-state names present in the body and decides
-from graph geometry (potency direction, lineage identity). It stays safe (all-false -> no_op)
-on anything it cannot judge.
+classify() runs a deterministic, fully OFFLINE classifier (no network, no LLM). It reads the
+cell-state names present in the body and decides from graph geometry (potency direction, lineage
+identity), plus a sentence-scoped prose layer that reads potency *direction* when only one canonical
+state is named (a reversal toward a less-committed state, or an identity-preserving age/function
+change). Every decision is anchored on a real cell-state NAME appearing in the same sentence as the
+cue, so untrusted instruction text -- which names no cell state and describes no transition -- is
+inert. It stays safe (all-false -> no_op) on anything it cannot judge.
+
+An optional `complete` callable (an LLM) may be injected for experimentation, but it is never wired
+up automatically: the shipped submission is offline-only.
 """
 from __future__ import annotations
 import re
-import sys
 import warnings
 from dataclasses import dataclass
 import json
-import os
-
-
-# ---------------------------------------------------------------------------
-# Eager startup check: tell the user RIGHT AWAY whether the LLM is available.
-# This runs once at import time, before any evidence items are processed.
-# ---------------------------------------------------------------------------
-def _check_llm_ready() -> bool:
-    key = os.getenv("GT_API_KEY")
-    base = os.getenv("GT_BASE_URL")
-    if not key or not base:
-        missing = [v for v, val in [("GT_API_KEY", key), ("GT_BASE_URL", base)] if not val]
-        print(
-            f"\n{'='*60}\n"
-            f"  ⚠  GROUND TRUTH: LLM is NOT configured.\n"
-            f"  Missing env vars: {', '.join(missing)}\n"
-            f"\n"
-            f"  Results will have LOWER ACCURACY without an LLM.\n"
-            f"  The geometric fallback cannot handle all evidence types.\n"
-            f"\n"
-            f"  To enable the LLM, set these before running:\n"
-            f"    GT_API_KEY=<your-api-key>\n"
-            f"    GT_BASE_URL=<endpoint-url>  (e.g. https://api.deepseek.com)\n"
-            f"    GT_MODEL=<model-name>        (optional, default: deepseek-chat)\n"
-            f"{'='*60}\n",
-            file=sys.stderr,
-        )
-        return False
-    try:
-        import openai  # noqa: F401
-    except ImportError:
-        print(
-            f"\n{'='*60}\n"
-            f"  ⚠  GROUND TRUTH: 'openai' package is NOT installed.\n"
-            f"  LLM env vars are set but the client library is missing.\n"
-            f"\n"
-            f"  Results will have LOWER ACCURACY without an LLM.\n"
-            f"\n"
-            f"  Install with:  pip install openai\n"
-            f"{'='*60}\n",
-            file=sys.stderr,
-        )
-        return False
-    print(
-        f"  ✓  GROUND TRUTH: LLM configured "
-        f"(model={os.getenv('GT_MODEL', 'deepseek-chat')}, "
-        f"base={base})",
-        file=sys.stderr,
-    )
-    return True
-
-
-_LLM_AVAILABLE = _check_llm_ready()
 
 
 @dataclass
@@ -75,10 +27,32 @@ class Verdict:
     target: str | None = None       # the existing claim id it bears on
 
 
+def _match_state(token: str, view):
+    """Resolve one word token to a canonical cell state, tolerating simple morphology.
+
+    The matcher is still NAME-anchored (no fuzzy/marker matching): it only strips regular English
+    plurals so "Fibroblasts"/"Neurons"/"IntestinalEpithelialCells" resolve to their canonical state.
+    Hyphenated forms (e.g. "MesodermalProgenitor-like") already split on the hyphen at tokenization,
+    so the leading canonical token is matched directly."""
+    cs = view.cell_state(token)
+    if cs is not None:
+        return cs
+    low = token.lower()
+    if low.endswith("s") and len(token) > 3:            # regular plural: Fibroblasts -> Fibroblast
+        cs = view.cell_state(token[:-1])
+        if cs is not None:
+            return cs
+    if low.endswith("es") and len(token) > 4:           # -es plural (rare here, kept for safety)
+        cs = view.cell_state(token[:-2])
+        if cs is not None:
+            return cs
+    return None
+
+
 def _mentioned_states(body: str, view) -> list:
     out, seen = [], set()
     for m in re.finditer(r"[A-Za-z][A-Za-z0-9]+", body):
-        cs = view.cell_state(m.group(0))
+        cs = _match_state(m.group(0), view)
         if cs is not None and cs.name not in seen:
             seen.add(cs.name)
             out.append(cs)
@@ -125,6 +99,103 @@ def classify_geometric(body: str, view) -> Verdict:
             and not passed_through_intermediate):
         v.is_regime = True
     return v
+
+
+# ---------------------------------------------------------------------------------------------
+# Sentence-scoped PROSE layer (offline). Runs only when the geometry above abstains (it needs two
+# named canonical states). It reads potency DIRECTION from natural language when a single canonical
+# state is named -- e.g. PR06 ("MidState ... reverted to a less-committed state"), which names one
+# state and paraphrases the destination.
+#
+# INJECTION SAFETY: every rule requires a canonical cell-state NAME in the *same sentence* as the
+# cue. Injection payloads name no canonical cell state and describe no transition, so they never
+# satisfy a rule -- neither standalone nor appended to a benign body (they occupy their own
+# sentences, which contain no canonical name). Magnitude is still decided entirely by dispose() from
+# structured provenance, so even a mislabelled sentence cannot size or authorise a write from text.
+# ---------------------------------------------------------------------------------------------
+# Split on sentence terminators only (NOT ';' -- a semicolon chains clauses of one thought, e.g.
+# "...remained Neuron; only firing rate declined", where the identity clause and the excluded-axis
+# property must be read together). Injection isolation is unaffected: an appended payload follows a
+# terminal '.', so it always lands in its own (name-free) sentence.
+_SENTENCE_SPLIT = re.compile(r"[.!?]+\s+|\n+")
+
+# A move to a LOWER potency number (more potent / less committed) = a reversal, contradicting the
+# potency-monotonicity family (C1 / C3g). Two ways to say it:
+#   1. an explicit dedifferentiation verb, or
+#   2. a movement verb aimed at a lower-potency destination noun.
+_LOW_POTENCY_NOUN = (r"(?:pluripoten\w*|stem[-\s]?like|stem\s+cell\w*|progenitor\w*|multipotent\w*|"
+                     r"source\s+state|naive|ground\s+state|less[-\s]?committed|less[-\s]?"
+                     r"differentiated|primitive|embryonic|blastocyst\w*)")
+_REVERSAL_VERB = re.compile(
+    r"\b(?:reverted|reverting|reverts|revert|reversion|de-?differentiat\w*|regress\w*|"
+    r"back-?slid\w*|de-?committ\w*)\b", re.I)
+_MOVE_TO_LOW = re.compile(
+    r"\b(?:return\w*|reset\w*|driven|drove|push\w*|convert\w*|reprogram\w*|brought|taken|sent|"
+    r"restored)\b[\w\s,'-]{0,45}?\b" + _LOW_POTENCY_NOUN + r"\b", re.I)
+_LESS_COMMITTED = re.compile(r"\bless[-\s]?(?:committed|differentiated|mature|specialized)\b", re.I)
+
+# Negation before a reversal cue means the transition did NOT happen (a confirmation, not a
+# contradiction): "never reverted", "no dedifferentiation", "failed to revert".
+_NEGATION = re.compile(
+    r"\b(?:no|not|never|without|neither|nor|cannot|can't|couldn't|didn't|doesn't|failed|fails|"
+    r"fail)\b", re.I)
+
+# Identity-preserving markers: the cell stayed the same state; only an off-axis property changed.
+_IDENTITY_KEPT = re.compile(
+    r"\b(?:remain\w*|stay\w*|retain\w*|kept|unchanged|preserv\w*|identical|stable)\b", re.I)
+_IDENTITY_KEPT_EXPLICIT = re.compile(
+    r"\bno\s+(?:shift|change)\s+in\s+(?:potency|lineage|identity)\b"
+    r"|\bno\s+(?:lineage|potency|identity)\s+(?:reassignment|change|shift)\b"
+    r"|\b(?:potency|lineage|identity)\b[\w\s,'-]{0,25}\bunchanged\b"
+    r"|\bno\s+dedifferentiation\b|\bidentity\s+(?:was\s+)?retained\b", re.I)
+
+# Properties on the graph's EXCLUDED axes (biological_age, cell_function_independent_of_identity).
+_EXCLUDED_AXIS_PROP = re.compile(
+    r"\b(?:age|aged|aging|ageing|senescen\w*|senolytic\w*|telomere\w*|circadian|karyotyp\w*|"
+    r"proliferat\w*|migrat\w*|firing\s+rate\w*|action\s+potential\w*|mitochondri\w*|metaboli\w*|"
+    r"ATP|secretion\w*|enzyme\w*|barrier|contractile\s+(?:output|function|marker)|fatigue|"
+    r"synaptic|electrophysiolog\w*|functional\s+(?:decline|readout|recovery)|doubling\s+time|"
+    r"passage\s+\d|culture[-\s]aging|donor\s+age|regenerative)\b", re.I)
+
+
+def _sentences(body: str) -> list[str]:
+    return [s for s in _SENTENCE_SPLIT.split(body or "") if s.strip()]
+
+
+def _reversal_in(sentence: str) -> bool:
+    """True if the sentence asserts a (non-negated) move toward a less-committed / more-potent state."""
+    m = _REVERSAL_VERB.search(sentence) or _MOVE_TO_LOW.search(sentence) or _LESS_COMMITTED.search(sentence)
+    if m is None:
+        return False
+    neg = _NEGATION.search(sentence, 0, m.start())     # negation appearing before the cue
+    return neg is None
+
+
+def classify_prose(body: str, view) -> Verdict:
+    """Sentence-scoped, name-anchored reading of potency direction. Used only when geometry abstains."""
+    v = Verdict()
+    for sent in _sentences(body):
+        states = _mentioned_states(sent, view)
+        if not states:
+            continue                                   # no canonical name in this sentence -> ignore
+        identity_kept = bool(_IDENTITY_KEPT_EXPLICIT.search(sent)
+                             or (_IDENTITY_KEPT.search(sent) and len(states) == 1))
+        if identity_kept and _EXCLUDED_AXIS_PROP.search(sent):
+            v.is_axis = True                           # same identity, only an excluded-axis property moved
+            return v
+        if not identity_kept and _reversal_in(sent):
+            v.is_contradiction = True                  # a described reversal is an in-model contradiction
+            v.target = _pick_target(states, view)
+            return v
+    return v
+
+
+def classify_offline(body: str, view) -> Verdict:
+    """The full deterministic offline classifier: canonical-name geometry first, prose fallback."""
+    v = classify_geometric(body, view)
+    if v.is_axis or v.is_regime or v.is_contradiction or v.is_support:
+        return v
+    return classify_prose(body, view)
 
 
 def _system_prompt(view) -> str:
@@ -279,55 +350,38 @@ def _parse_verdict(raw: str) -> Verdict | None:
 
 
 def _default_complete():
-    key, base = os.getenv("GT_API_KEY"), os.getenv("GT_BASE_URL")
-    model = os.getenv("GT_MODEL", "deepseek-chat")
-    if not key or not base:
-        return None  # startup check already warned the user
-
-    try:
-        from openai import OpenAI  # noqa: F811
-    except ImportError:
-        return None  # startup check already warned the user
-
-    def _complete(system: str, user: str) -> str:
-        client = OpenAI(api_key=key, base_url=base)
-        kwargs = dict(
-            model=model, temperature=float(os.getenv("GT_TEMP", "0")),
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        try:  # some deployments (e.g. DeepSeek V4 on Azure) reject response_format; retry without it
-            resp = client.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
-        except Exception:
-            resp = client.chat.completions.create(**kwargs)
-        return resp.choices[0].message.content or ""
-
-    return _complete
+    # The shipped submission is OFFLINE-ONLY: no LLM is ever wired up automatically. An LLM can still
+    # be injected explicitly via classify(..., complete=fn) for experimentation, but by policy the
+    # judged solution uses no external model. Returning None keeps classify() on the offline path.
+    return None
 
 
 def classify(body: str, view, complete=None) -> Verdict:
     complete = complete or _default_complete()
-    # The geometric verdict is injection-immune (reads only canonical state names) -- compute it
-    # every call and feed it to the LLM as a grounding anchor, and use it as the offline fallback.
-    geo = classify_geometric(body, view)
+    # The offline classifier is the real solution: canonical-name geometry + a sentence-scoped,
+    # name-anchored prose reading. It is injection-immune (a decision needs a real cell-state name in
+    # the same sentence as the cue), and it is also the fallback whenever an injected LLM misbehaves.
+    offline = classify_offline(body, view)
     if complete is None:
-        return geo
+        return offline
+    geo = classify_geometric(body, view)
     recognized = [s.name for s in _mentioned_states(body, view)]
     try:
         v = _parse_verdict(complete(_system_prompt(view), _user_prompt(body, geo, recognized)))
     except Exception as exc:
         warnings.warn(
-            f"GROUND TRUTH: LLM call failed ({type(exc).__name__}: {exc}); "
-            f"falling back to geometric classifier for this item.",
+            f"GROUND TRUTH: injected classifier failed ({type(exc).__name__}: {exc}); "
+            f"falling back to the offline classifier for this item.",
             stacklevel=2,
         )
-        return geo
+        return offline
     if v is None:
         warnings.warn(
-            "GROUND TRUTH: LLM returned unparseable response; "
-            "falling back to geometric classifier for this item.",
+            "GROUND TRUTH: injected classifier returned unparseable response; "
+            "falling back to the offline classifier for this item.",
             stacklevel=2,
         )
-        return geo
+        return offline
     # Robustness: the model sometimes flags a contradiction but omits or misnames the target claim,
     # which would otherwise drop to a no_op. Derive the target from the mentioned cell states -- the
     # LLM detects the contradiction, geometry supplies which claim it hits. This also stabilizes

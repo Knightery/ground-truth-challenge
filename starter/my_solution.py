@@ -1,8 +1,10 @@
-"""GROUND TRUTH solution: strength -> classify -> dispose.
+"""GROUND TRUTH solution: classify -> strength -> dispose (fully offline, no network / no LLM).
 
-strength() sizes any change from the STRUCTURED provenance; classify() (one LLM call, or a
-geometric fallback) says what the evidence is; dispose() maps that to legal Deltas and never
-reads the body. Injections are inert by construction: we only act on a described transition.
+strength() sizes any change from the STRUCTURED provenance; classify() reads the body only to say
+what KIND of transition is described (deterministic, canonical-name-anchored, sentence-scoped);
+dispose() maps that to legal Deltas and never reads the body. Injections are inert by construction:
+a classification requires a real cell-state name in the same sentence as its cue, and magnitude comes
+only from structured provenance -- so instruction text can neither trigger nor size a mutation.
 """
 from __future__ import annotations
 import os

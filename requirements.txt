@@ -1,5 +1,2 @@
 # GROUND TRUTH runs on the Python standard library alone.
-# If your solution calls an LLM, add its client here, e.g.:
-# anthropic>=0.40
-openai>=1.0
-deep-translator>=1.11   # programmatic Greek translation of untrusted evidence (injection hardening)
+# The submission is fully OFFLINE and deterministic: no LLM / no network integration.
