@@ -48,9 +48,10 @@ cell-state names**.
   `is_support` on that mechanism child.
 
 Negation is handled at two scopes: cue-negation is token-tight (so `rather than reprogramming`,
-`never reverted` deny, but a distant `no …` does not misfire), while denial that *suppresses a
-detected drop* is judged only on the **self-contained sentence naming both endpoints** — an appended
-payload lives in its own sentence and can never reach in to flip or redirect the real verdict.
+`never reverted` deny, but a distant `no …` does not misfire; hyphenated compounds like
+`factor-free` are not read as negation), while denial that *suppresses a detected drop* is judged
+only on the **self-contained sentence naming both endpoints** — an appended payload lives in its
+own sentence and can never reach in to flip or redirect the real verdict.
 
 ## 3. State Resolution & Mutations (`dispose`)
 
@@ -94,5 +95,9 @@ a marker-only lateral conversion (endpoints named by `myosin heavy chain` / `int
 rather than canonical names) is now recognised as a regime. The only remaining offline no_op misses
 are three confirmations of the contested nuclear-potential claim C4 — deliberately left uncaught:
 the sole textual cue ("differentiated cells retain developmental potential") is a phrase an injection
-can and does contain (see FW-SEMANTIC-03), so any detector for it is spoofable. Per the challenge's
-firewall gate, a safe no_op is strictly preferable to a mutation an attacker could trigger.
+can and does contain (see FW-SEMANTIC-03), so any detector for it is spoofable (even if gated on
+`method_class`, a hidden nuclear-transfer provenance tier would reopen the hole). Per the
+firewall gate, a safe no_op beats a mutation an attacker could trigger. Cross-item weak-evidence
+pooling and rollback of already-applied revisions are likewise left unimplemented: they are outside
+Capability 3 as specified (hold/drop *pending*, slight confirmation strengthen), and `rollback` is
+not a legal `Delta`.
