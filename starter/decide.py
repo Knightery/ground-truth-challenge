@@ -32,6 +32,14 @@ def _resolve_target(target, prov, view):
     for key, child in MECHANISM_CHILD.items():
         if key in method and child in claim.derived_from and view.get_claim(child) is not None:
             return child
+    # No mechanism-specific child matched (an unmapped / novel mechanism). Revising the umbrella
+    # DIRECTLY is silently erased by the API's min-over-children propagation, so a strong result
+    # would move belief by ~0. Target the current MINIMUM child instead -- lowering it actually
+    # lowers the umbrella via min-propagation (matches the DESIGN: target children, let the parent
+    # settle). Novel-mechanism reversals still count against "cannot return by ANY mechanism".
+    children = [c for c in claim.derived_from if view.get_claim(c) is not None]
+    if children:
+        return min(children, key=lambda c: view.get_claim(c).confidence)
     return target
 
 
